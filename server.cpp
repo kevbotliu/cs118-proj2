@@ -12,6 +12,9 @@
 #include <signal.h>
 #include <bitset>
 
+const uint16_t ACK = 4;
+const uint16_t SYN = 2;
+const uint16_t FIN = 1;
 
 int sock_fd;
 struct sockaddr_in server, client;
@@ -59,15 +62,18 @@ void setup(int port) {
 	server.sin_family = AF_INET;
 	server.sin_addr.s_addr = INADDR_ANY;
 	server.sin_port = htons(port);
-	 
+
 	if (bind(sock_fd, (struct sockaddr*)&server, sizeof(server)) < 0) send_error("Failed binding socket to port.");
 }
 
 void parse_header(uint32_t buffer[3], Header& h) {
 	h.seq_num = ntohl(buffer[0]);
 	h.ack_num = ntohl(buffer[1]);
-	h.conn_id = ntohs(buffer[2] >> 16);
-	h.flags = std::bitset<16>((uint16_t) ntohs(buffer[2]));
+  int conn =  ntohs(buffer[2]);
+	h.conn_id = (conn >> 16);
+	h.flags[13] = ((conn & ACK) >> 2);
+  h.flags[14] = ((conn & SYN) >> 1);
+  h.flags[15] = conn & FIN;
 
 	std::cout << "PARSED\n";
 	std::cout << h.seq_num << "\n";
@@ -94,9 +100,9 @@ void handle_transfer(std::string file_dir) {
 
 	int num_bytes, bytes_written;
     while (1) {
-    	memset(&client, 0, sizeof(client)); 
+    	memset(&client, 0, sizeof(client));
     	memset(buffer, 0, sizeof(buffer));
-    	
+
     	if ((num_bytes = recvfrom(sock_fd, buffer, 524, 0, (struct sockaddr*)&client, &addr_len)) > 0) {
     		Header h;
     		memset(header, 0, sizeof(header));
@@ -119,7 +125,7 @@ void handle_transfer(std::string file_dir) {
 	    else send_error("File transfer receiving error occurred.");
     }
 
-    
+
 
 	// fclose(sock_fd);
 }

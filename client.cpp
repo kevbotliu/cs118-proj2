@@ -29,14 +29,10 @@ const uint16_t FIN = 1;
 const uint32_t MAXNUM = 102400;
 const uint16_t HEADER_SIZE = 12;
 
-uint32_t seqnum, acknum;
-uint16_t conid, flgs;
-
 int sockfd;
 struct addrinfo* result;
 struct sockaddr_in* servaddr;
 
-//TODO:FIX NETWORK CONNECTION. This really should work
 void setup(char* port, char* host){
   struct addrinfo hints;
   memset(&hints, 0, sizeof(struct addrinfo));
@@ -56,24 +52,19 @@ void setup(char* port, char* host){
 		exit(1);
   }
   servaddr = (struct sockaddr_in *) result->ai_addr;
-  // std::cout << servaddr->sin_family << " " << AF_INET << std::endl;
-  // std::cout << servaddr->sin_port << " " <<  htons(std::stoi(port)) << std::endl;
-  //servaddr->sin_family = AF_INET;
-  //servaddr->sin_port = htons(stoi(port));
 }
 
-//FUNCTIONAL
-uint8_t* create_header(Header head){
-  static uint8_t buff[HEADER_SIZE];
+int* create_header(Header head){
+  static int buff[HEADER_SIZE];
   memset(buff, 0, sizeof(buff));
   uint32_t nseqnum = htonl(head.seq_num);
   uint32_t nacknum = htonl(head.ack_num);
   uint16_t nconid = htons(head.conn_id);
   uint16_t nflgs = htons((uint16_t) ((head.flags[13]<<2)+(head.flags[14]<<1)+head.flags[15]));
+  uint32_t nconflg = nconid << 16 | nflgs;
   memcpy(buff, &nseqnum, 4);
-  memcpy(buff + 4,&nacknum, 4);
-  memcpy(buff + 8, &nconid, 2);
-  memcpy(buff + 10, &nflgs, 2);
+  memcpy(buff + 1,&nacknum, 4);
+  memcpy(buff + 2, &nconflg, 4);
   return buff;
 }
 
@@ -84,12 +75,12 @@ void handle_transfer(){
   h.conn_id = 0;
   h.flags[14] = 1; //SYN
 
-  uint8_t* sendbuff = create_header(h);
+  int* sendbuff = create_header(h);
   char recvbuff[HEADER_SIZE];
 
   socklen_t len;
   do{
-    rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (const struct sockaddr *) &servaddr, sizeof(servaddr));
+    rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
   }while(rv == -1);
   std::cout << rv << std::endl;
   int recvbytes;
