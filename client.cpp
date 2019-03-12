@@ -173,7 +173,25 @@ void handle_transfer(){
     fprintf(stderr, "ERROR: Sending Ack to server. %s\n", strerror(errno));
     exit(1);
   }
-  
+  //SEND FILE
+  char readbuff[PACKET_SIZE - HEADER_SIZE];
+  int readbytes = fread(readbuff, sizeof(char), PACKET_SIZE - HEADER_SIZE, c.fd);
+  if(readbytes < 0){
+    fprintf(stderr, "ERROR: Sending file to server. %s\n", strerror(errno));
+    exit(1);
+  }
+  char packet[PACKET_SIZE];
+  memset(packet, 0, PACKET_SIZE);
+  create_header(h, c.client_seq_num, c.server_seq_num, c.id, 0);
+  create_buffer(sendbuff, h);
+  memcpy(packet, sendbuff, HEADER_SIZE);
+  memcpy(packet + HEADER_SIZE, readbuff, PACKET_SIZE - HEADER_SIZE);
+  rv = sendto(sockfd, packet, PACKET_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Sending packet to server. %s\n", strerror(errno));
+    exit(1);
+  }
+
 }
 
 int main(int argc, char* argv[])
