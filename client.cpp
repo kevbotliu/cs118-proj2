@@ -54,38 +54,91 @@ void setup(char* port, char* host){
   servaddr = (struct sockaddr_in *) result->ai_addr;
 }
 
-int* create_header(Header head){
-  static int buff[HEADER_SIZE];
+uint32_t* create_buffer(Header head){
+  static uint32_t buff[HEADER_SIZE];
   memset(buff, 0, sizeof(buff));
   uint32_t nseqnum = htonl(head.seq_num);
   uint32_t nacknum = htonl(head.ack_num);
   uint16_t nconid = htons(head.conn_id);
-  uint16_t nflgs = htons((uint16_t) ((head.flags[13]<<2)+(head.flags[14]<<1)+head.flags[15]));
+  uint16_t nflgs = htons((uint16_t) ((head.flags[13]<<2)|(head.flags[14]<<1)|head.flags[15]));
   uint32_t nconflg = nconid << 16 | nflgs;
   memcpy(buff, &nseqnum, 4);
-  memcpy(buff + 1,&nacknum, 4);
+  memcpy(buff + 1, &nacknum, 4);
   memcpy(buff + 2, &nconflg, 4);
   return buff;
 }
 
+void parse_header(uint32_t buffer[3], Header& h) {
+	h.seq_num = ntohl(buffer[0]);
+	h.ack_num = ntohl(buffer[1]);
+  int conn =  ntohs(buffer[2]);
+	h.conn_id = (conn >> 16);
+	h.flags[13] = ((conn & ACK) >> 2);
+  h.flags[14] = ((conn & SYN) >> 1);
+  h.flags[15] = conn & FIN;
+
+	std::cout << "PARSED\n";
+	std::cout << h.seq_num << "\n";
+	std::cout << h.ack_num << "\n";
+	std::cout << h.conn_id << "\n";
+	std::cout << h.flags[13] << "\n";
+	std::cout << h.flags[14] << "\n";
+	std::cout << h.flags[15] << "\n";
+}
+
+void create_header(Header& h, uint32_t seq, uint32_t ack, uint16_t conid, uint16_t flgs){
+  h.seq_num = seq;
+  h.ack_num = ack;
+  h.conn_id = conid;
+  h.flags[13]= ((flgs & ACK) >> 2);
+  h.flags[14]= ((flgs & SYN) >> 1);
+  h.flags[15]= (flgs & FIN);
+}
+
+int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t conid, uint16_t flgs){
+  if(h.seq_num == seq && h.ack_num == ack && h.conn_id == conid
+    && ((uint16_t) ((h.flags[13]<<2)|(h.flags[14]<<1)|h.flags[15])) == flgs){
+      return 1;
+  }
+  return -1;
+}
+
 void handle_transfer(){
   Header h;
-  h.seq_num = 12345;
-  h.ack_num = 0;
-  h.conn_id = 0;
-  h.flags[14] = 1; //SYN
+  create_header(h, 12345, 0, 0, SYN);
 
-  int* sendbuff = create_header(h);
-  char recvbuff[HEADER_SIZE];
+  uint32_t* sendbuff = create_buffer(h);
+  uint32_t recvbuff[HEADER_SIZE/sizeof(int)];
 
   socklen_t len;
-  do{
-    rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
-  }while(rv == -1);
+  //Send SYN
+  rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Sending SYN to server. %s\n", strerror(errno));
+    exit(1);
+  }
   std::cout << rv << std::endl;
+
+  //Recieve SYN ACK
   int recvbytes;
   recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE,0, (struct sockaddr *) &servaddr, &len);
   std::cout << recvbytes << std::endl;
+  Header synack;
+  parse_header(recvbuff, synack);
+  rv = check_header(synack, 4321, 12346, 1, SYN | ACK);
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Recieving SYN ACK from server. %s\n", strerror(errno));
+    exit(1);
+  }
+
+  //Send ACK
+  create_header(h, 12346, 4322, 1, ACK);
+  sendbuff = create_buffer(h);
+  rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Sending SYN to server. %s\n", strerror(errno));
+    exit(1);
+  }
 }
 
 int main(int argc, char* argv[])
