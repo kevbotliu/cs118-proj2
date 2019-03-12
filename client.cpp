@@ -54,18 +54,16 @@ void setup(char* port, char* host){
   servaddr = (struct sockaddr_in *) result->ai_addr;
 }
 
-uint32_t* create_buffer(Header head){
-  static uint32_t buff[HEADER_SIZE];
-  memset(buff, 0, sizeof(buff));
+void create_buffer(uint32_t (&sendbuff)[HEADER_SIZE/sizeof(int)], Header head){
+  memset(sendbuff, 0, sizeof(sendbuff));
   uint32_t nseqnum = htonl(head.seq_num);
   uint32_t nacknum = htonl(head.ack_num);
   uint16_t nconid = htons(head.conn_id);
   uint16_t nflgs = htons((uint16_t) ((head.flags[13]<<2)|(head.flags[14]<<1)|head.flags[15]));
   uint32_t nconflg = nconid << 16 | nflgs;
-  memcpy(buff, &nseqnum, 4);
-  memcpy(buff + 1, &nacknum, 4);
-  memcpy(buff + 2, &nconflg, 4);
-  return buff;
+  memcpy(sendbuff, &nseqnum, 4);
+  memcpy(sendbuff + 1, &nacknum, 4);
+  memcpy(sendbuff + 2, &nconflg, 4);
 }
 
 void parse_header(uint32_t buffer[3], Header& h) {
@@ -106,8 +104,8 @@ int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t conid, uint16_t 
 void handle_transfer(){
   Header h;
   create_header(h, 12345, 0, 0, SYN);
-
-  uint32_t* sendbuff = create_buffer(h);
+  uint32_t sendbuff[HEADER_SIZE/sizeof(int)];
+  create_buffer(sendbuff, h);
   uint32_t recvbuff[HEADER_SIZE/sizeof(int)];
 
   socklen_t len;
@@ -133,7 +131,7 @@ void handle_transfer(){
 
   //Send ACK
   create_header(h, 12346, 4322, 1, ACK);
-  sendbuff = create_buffer(h);
+  create_buffer(sendbuff, h);
   rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
   if(rv < 0){
     fprintf(stderr, "ERROR: Sending SYN to server. %s\n", strerror(errno));
@@ -151,9 +149,8 @@ int main(int argc, char* argv[])
     std::cerr << "ERROR: Invalid Port Number" << std::endl;
     exit(1);
   }
-  char* portstring = argv[2];
-  int portno = std::stoi(argv[2]);
   char* hostname = argv[1];
+  char* portstring = argv[2];
   char* file = argv[3];
   setup(portstring,hostname);
   handle_transfer();
