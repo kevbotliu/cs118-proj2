@@ -36,11 +36,11 @@ To dissect tcpdump-recorded file, you can use `-r <pcapfile>` option. For exampl
 Nathan March\
 UID: 404827938
 
-John Kujawski\
-UID: 
-
 Kevin Liu\
 UID: 504862375
+
+John Kujawski\
+UID: 604835032
 
 ------
 
