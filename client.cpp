@@ -23,15 +23,31 @@ struct Header {
     std::bitset<16> flags;
 };
 
+struct Connection {
+	uint16_t id;
+	FILE* fd;
+	uint32_t client_seq_num;
+	uint32_t server_seq_num;
+	bool will_close = false;
+  uint32_t cwnd;
+  uint32_t ssthresh;
+};
+
 const uint16_t ACK = 4;
 const uint16_t SYN = 2;
 const uint16_t FIN = 1;
+
 const uint32_t MAXNUM = 102400;
 const uint16_t HEADER_SIZE = 12;
+const uint16_t PACKET_SIZE = 524;
+const uint16_t MAX_CWND = 51200;
+const uint16_t INIT_CWND = 512;
+const uint16_t INIT_SSTHRESH = 10000;
 
 int sockfd;
 struct addrinfo* result;
 struct sockaddr_in* servaddr;
+struct Connection c;
 
 void setup(char* port, char* host){
   struct addrinfo hints;
@@ -54,38 +70,128 @@ void setup(char* port, char* host){
   servaddr = (struct sockaddr_in *) result->ai_addr;
 }
 
-int* create_header(Header head){
-  static int buff[HEADER_SIZE];
-  memset(buff, 0, sizeof(buff));
+void create_buffer(uint32_t (&sendbuff)[HEADER_SIZE/sizeof(int)], Header head){
+  memset(sendbuff, 0, sizeof(sendbuff));
   uint32_t nseqnum = htonl(head.seq_num);
   uint32_t nacknum = htonl(head.ack_num);
-  uint16_t nconid = htons(head.conn_id);
-  uint16_t nflgs = htons((uint16_t) ((head.flags[13]<<2)+(head.flags[14]<<1)+head.flags[15]));
-  uint32_t nconflg = nconid << 16 | nflgs;
-  memcpy(buff, &nseqnum, 4);
-  memcpy(buff + 1,&nacknum, 4);
-  memcpy(buff + 2, &nconflg, 4);
-  return buff;
+  uint32_t nconflg = htonl((head.conn_id << 16) | ((uint16_t)(head.flags[13]<<2)|(head.flags[14]<<1)|head.flags[15]));
+  memcpy(sendbuff, &nseqnum, 4);
+  memcpy(sendbuff + 1, &nacknum, 4);
+  memcpy(sendbuff + 2, &nconflg, 4);
+}
+
+void parse_header(uint32_t buffer[3], Header& h) {
+	h.seq_num = ntohl(buffer[0]);
+	h.ack_num = ntohl(buffer[1]);
+  uint32_t conn = ntohl(buffer[2]);
+	h.flags[13] = ((conn & ACK) >> 2);
+  h.flags[14] = ((conn & SYN) >> 1);
+  h.flags[15] = conn & FIN;
+  h.conn_id = (conn >> 16);
+
+	std::cout << "RECV " << h.seq_num << " " << h.ack_num << " " << h.conn_id << " " << c.cwnd << " " << c.ssthresh;
+  if(h.flags[13]){
+    std::cout << " ACK";
+  }
+  if(h.flags[14]){
+    std::cout << " SYN";
+  }
+  if(h.flags[15]){
+    std::cout << " FIN";
+  }
+	std::cout << std::endl;
+}
+
+void create_header(Header& h, uint32_t seq, uint32_t ack, uint16_t conid, uint16_t flgs){
+  h.seq_num = seq;
+  h.ack_num = ack;
+  h.conn_id = conid;
+  h.flags[13]= ((flgs & ACK) >> 2);
+  h.flags[14]= ((flgs & SYN) >> 1);
+  h.flags[15]= (flgs & FIN);
+
+  std::cout << "SEND " << seq << " " << ack << " " << conid << " " << c.cwnd << " " << c.ssthresh;
+  if(h.flags[13]){
+    std::cout << " ACK";
+  }
+  if(h.flags[14]){
+    std::cout << " SYN";
+  }
+  if(h.flags[15]){
+    std::cout << " FIN";
+  }
+	std::cout << std::endl;
+}
+
+int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t conid, uint16_t flgs){
+  if(h.seq_num == seq && h.ack_num == ack && h.conn_id == conid
+    && ((uint16_t) ((h.flags[13]<<2)|(h.flags[14]<<1)|h.flags[15])) == flgs){
+    return 1;
+  }else{
+    return -1;
+  }
 }
 
 void handle_transfer(){
+  c.cwnd = INIT_CWND;
+  c.ssthresh = INIT_SSTHRESH;
   Header h;
-  h.seq_num = 12345;
-  h.ack_num = 0;
-  h.conn_id = 0;
-  h.flags[14] = 1; //SYN
-
-  int* sendbuff = create_header(h);
-  char recvbuff[HEADER_SIZE];
+  c.client_seq_num = 12345;
+  create_header(h, 12345, 0, 0, SYN);
+  uint32_t sendbuff[HEADER_SIZE/sizeof(int)];
+  create_buffer(sendbuff, h);
+  uint32_t recvbuff[HEADER_SIZE/sizeof(int)];
 
   socklen_t len;
-  do{
-    rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
-  }while(rv == -1);
-  std::cout << rv << std::endl;
+  //Send SYN
+  rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Sending SYN to server. %s\n", strerror(errno));
+    exit(1);
+  }
+
+  //Recieve SYN ACK
   int recvbytes;
-  recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE,0, (struct sockaddr *) &servaddr, &len);
-  std::cout << recvbytes << std::endl;
+  recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE,0, (struct sockaddr *) &(*servaddr), &len);
+  Header synack;
+  parse_header(recvbuff, synack);
+  c.id = synack.conn_id;
+  c.server_seq_num = synack.seq_num;
+  c.client_seq_num++;
+  rv = check_header(synack, c.server_seq_num, c.client_seq_num, c.id, SYN | ACK);
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Recieving SYN ACK from server. %s\n", strerror(errno));
+    exit(1);
+  }
+
+  //Send ACK
+  c.server_seq_num++;
+  create_header(h, c.client_seq_num, c.server_seq_num, c.id, ACK);
+  create_buffer(sendbuff, h);
+  rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Sending Ack to server. %s\n", strerror(errno));
+    exit(1);
+  }
+  //SEND FILE
+  char readbuff[PACKET_SIZE - HEADER_SIZE];
+  int readbytes = fread(readbuff, sizeof(char), PACKET_SIZE - HEADER_SIZE, c.fd);
+  if(readbytes < 0){
+    fprintf(stderr, "ERROR: Sending file to server. %s\n", strerror(errno));
+    exit(1);
+  }
+  char packet[PACKET_SIZE];
+  memset(packet, 0, PACKET_SIZE);
+  create_header(h, c.client_seq_num, c.server_seq_num, c.id, 0);
+  create_buffer(sendbuff, h);
+  memcpy(packet, sendbuff, HEADER_SIZE);
+  memcpy(packet + HEADER_SIZE, readbuff, PACKET_SIZE - HEADER_SIZE);
+  rv = sendto(sockfd, packet, PACKET_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+  if(rv < 0){
+    fprintf(stderr, "ERROR: Sending packet to server. %s\n", strerror(errno));
+    exit(1);
+  }
+
 }
 
 int main(int argc, char* argv[])
@@ -98,10 +204,10 @@ int main(int argc, char* argv[])
     std::cerr << "ERROR: Invalid Port Number" << std::endl;
     exit(1);
   }
-  char* portstring = argv[2];
-  int portno = std::stoi(argv[2]);
   char* hostname = argv[1];
+  char* portstring = argv[2];
   char* file = argv[3];
+  c.fd = fopen(file, "r");
   setup(portstring,hostname);
   handle_transfer();
 }
