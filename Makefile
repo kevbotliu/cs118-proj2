@@ -2,7 +2,7 @@ CXX=g++
 CXXOPTIMIZE= -O2
 CXXFLAGS= -g -Wall -pthread -std=c++11 $(CXXOPTIMIZE)
 USERID=404827938_504862375_604835032
-CLASSES=
+CLASSES=packet.cpp
 
 all: server client
 
