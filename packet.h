@@ -30,29 +30,29 @@ typedef struct {
 	bool ack_flag = false;
 	bool syn_flag = false;
 	bool fin_flag = false;
-	uint8_t payload[MAX_PAYLOAD_SIZE];
+	uint32_t payload[MAX_PAYLOAD_SIZE/4];
 	int packet_size;
 } PacketArgs;
 
 class Packet {
 public:
-	Packet(const uint8_t buffer[MAX_PACKET_SIZE], int packet_size);
+	Packet(const uint32_t buffer[MAX_PACKET_SIZE/4], int packet_size);
 	Packet(PacketArgs args);
 	~Packet();
 
     uint32_t seq_num, ack_num;
     uint16_t conn_id;
     bool ack_flag, syn_flag, fin_flag;
-    uint8_t* payload;
+    uint32_t payload[MAX_PAYLOAD_SIZE/4];
     int size;
 
-    uint8_t* to_byte_string();
+    uint32_t* to_uint32_string();
     bool is_valid() {return valid_;}
 
 private:
 	bool valid_;
 
-	bool parse(const uint8_t buffer[MAX_PACKET_SIZE]);
+	bool parse(const uint32_t buffer[MAX_PACKET_SIZE/4]);
 
 	
 };

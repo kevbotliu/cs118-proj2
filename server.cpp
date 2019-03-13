@@ -11,39 +11,34 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <bitset>
+#include <vector>
+#include "packet.h"
 
-const uint16_t ACK = 4;
-const uint16_t SYN = 2;
-const uint16_t FIN = 1;
 
 int sock_fd;
 struct sockaddr_in server, client;
-
-struct Header {
-    uint32_t seq_num;
-    uint32_t ack_num;
-    uint16_t conn_id;
-    std::bitset<16> flags;
-};
+std::string file_dir;
 
 struct Connection {
 	uint16_t id;
 	FILE* fd;
 	uint32_t client_seq_num;
 	uint32_t server_seq_num;
-	bool will_close = false;
 };
+
+std::vector<Connection> connections;
+uint16_t curr_max_id = 0;
 
 void setup(int port);
 void send_error(std::string msg, int exit_code = 1);
 void sig_handler(int signum);
-void handle_transfer(std::string file_dir);
+void handle_transfer();
 
 int main(int argc, char *argv[]) {
 	if (argc != 3) send_error("Must include only <PORT> and <FILE-DIR> arguments.");
 	int port = strtol(argv[1], nullptr, 0);
 	if (!port || port == LONG_MAX || port == LONG_MIN) send_error("Invalid port argument value.");
-	std::string file_dir = argv[2]; // Assume folder is correct
+	file_dir = argv[2]; // Assume folder is correct
 
 	struct sigaction sig_new;
 	sig_new.sa_handler = sig_handler;
@@ -53,7 +48,7 @@ int main(int argc, char *argv[]) {
     sigaction(SIGTERM, &sig_new, NULL);
 
 	setup(port);
-	handle_transfer(file_dir);
+	handle_transfer();
 }
 
 void setup(int port) {
@@ -66,28 +61,60 @@ void setup(int port) {
 	if (bind(sock_fd, (struct sockaddr*)&server, sizeof(server)) < 0) send_error("Failed binding socket to port.");
 }
 
-void parse_header(uint32_t buffer[3], Header& h) {
-	h.seq_num = ntohl(buffer[0]);
-	h.ack_num = ntohl(buffer[1]);
-  int conn =  ntohs(buffer[2]);
-	h.conn_id = (conn >> 16);
-	h.flags[13] = ((conn & ACK) >> 2);
-  h.flags[14] = ((conn & SYN) >> 1);
-  h.flags[15] = conn & FIN;
 
-	std::cout << "PARSED\n";
-	std::cout << h.seq_num << "\n";
-	std::cout << h.ack_num << "\n";
-	std::cout << h.conn_id << "\n";
-	std::cout << h.flags[13] << "\n";
-	std::cout << h.flags[14] << "\n";
-	std::cout << h.flags[15] << "\n";
+// int generate_packet(const Packet& p, const Connection& c) {
+// 	return 1;
+// }
+
+bool update_connection(Packet& p, Connection& conn) {
+	if (p.syn_flag) {
+		uint16_t new_id = curr_max_id + 1;
+
+		std::string filename = file_dir + "/" + std::to_string(new_id) + ".file";
+		std::cout << filename << "\n";
+		FILE *fd = fopen(filename.c_str(), "w+");
+		if (fd == nullptr) send_error("Failed creating new file.");
+		fclose (fd);
+
+		conn = {
+			id: new_id,
+			fd: fd,
+			client_seq_num: p.seq_num,
+			server_seq_num: 4321
+		};
+		connections.push_back(conn);
+
+		return true;
+	}
+	else {
+		for (Connection c : connections) {
+			if (p.conn_id == c.id) {
+				conn = c;
+				// Check correct seq and ack numbers
+				if (p.ack_num != c.server_seq_num+1 ||
+					p.seq_num != c.client_seq_num)
+					return false;
+
+				// Update connection values
+				int payload_size = p.size - HEADER_SIZE;
+				if (payload_size) c.client_seq_num += payload_size;
+				else c.client_seq_num += 1;
+			}
+		}
+	}
 }
 
-void handle_transfer(std::string file_dir) {
-	// std::string filename = file_dir + "/" + std::to_string(num_conn) + ".file";
-	// FILE *fd = fopen(filename.c_str(), "w");
-	// if (fd == nullptr) send_error("Failed creating new file.");
+bool process_packet(Packet& p) {
+	Connection c;
+	if (update_connection(p, c)) {
+		std::cout << "WOAH " << connections.size() << "\n";
+		// generate_packet(c);
+	}
+
+
+}
+
+void handle_transfer() {
 
 	// struct timeval tv;
 	// tv.tv_sec = 15;
@@ -95,22 +122,58 @@ void handle_transfer(std::string file_dir) {
 	// setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
 	socklen_t addr_len;
-	uint8_t buffer[524];
-	uint32_t header[3];
+	uint32_t buffer[MAX_PACKET_SIZE/4];
 
 	int num_bytes, bytes_written;
     while (1) {
-    	memset(&client, 0, sizeof(client));
+    	std::cout << "ENTERED\n";
     	memset(buffer, 0, sizeof(buffer));
 
-    	if ((num_bytes = recvfrom(sock_fd, buffer, 524, 0, (struct sockaddr*)&client, &addr_len)) > 0) {
-    		Header h;
-    		memset(header, 0, sizeof(header));
-    		memcpy(header, buffer, 12);
-    		parse_header(header, h);
+    	if ((num_bytes = recvfrom(sock_fd, buffer, MAX_PACKET_SIZE, 0, (struct sockaddr*)&client, &addr_len)) > 0) {
+    		Packet p = Packet(buffer, num_bytes);
+    		if (!p.is_valid()) continue;
+
+    		PacketArgs args;
+    		args.seq_num = 4321;
+    		args.ack_num = p.seq_num + 1;
+    		args.conn_id = 1;
+    		args.ack_flag = true;
+    		args.syn_flag = true;
+    		args.packet_size = 20;
+
+    		Packet new_p = Packet(args);
+
+    		uint32_t* blah = new_p.to_uint32_string();
+			if ((num_bytes = sendto(sock_fd, blah, new_p.size, 0, (struct sockaddr *)&client, addr_len)) <= 0) {
+				send_error("Packet sending error occurred.");
+			}
+			std::cout << num_bytes << "\n";
+
+    		// delete blah;
+
+    		// process_packet(p);
 
 
+   //  		uint8_t* buf = p.to_byte_string();
+   //  		std::cout << reinterpret_cast< char const* >(buf)<< "\n";
+   //  		if (p.syn_flag && !p.ack_flag && !p.fin_flag) {
 
+			// 	if ((num_bytes = sendto(sock_fd, buf, p.size, 0, (struct sockaddr *)&client, addr_len)) <= 0) {
+			// 		send_error("Packet sending error occurred.");
+			// 	}
+
+			// }
+			// free(buf);
+
+
+    		// std::cout << std::to_string(p.size) << "\n";
+    		// std::cout << std::to_string(p.seq_num) << "\n";
+    		// std::cout << std::to_string(p.ack_num) << "\n";
+    		// std::cout << std::to_string(p.conn_id) << "\n";
+    		// std::cout << std::to_string(p.ack_flag) << "\n";
+    		// std::cout << std::to_string(p.syn_flag) << "\n";
+    		// std::cout << std::to_string(p.fin_flag) << "\n";
+    		// std::cout << reinterpret_cast< char const* >(p.payload) << "\n";
 
 
 			// if ((bytes_written = fwrite(buffer, 1, num_bytes, fd)) < 0) send_error("Write error occurred.");
@@ -122,7 +185,7 @@ void handle_transfer(std::string file_dir) {
     	// 	if (fwrite("ERROR: File transfer timeout. Connection aborted.", 1, sizeof(char) * 49, fd) < 0) send_error("Write error occurred.");
     	// 	break;
     	// }
-	    else send_error("File transfer receiving error occurred.");
+	    else send_error("Packet receiving error occurred.");
     }
 
 
