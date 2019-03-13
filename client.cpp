@@ -59,7 +59,7 @@ void report_error(const std::string error_msg, const bool inc_errno, const int e
 	exit(exit_code);
 }
 
-void setup(char* port, char* host){
+void setup(char* port, char* host) {
 	struct addrinfo hints;
 	memset(&hints, 0, sizeof(struct addrinfo));
 	hints.ai_family = AF_INET;		/* Allow IPv4 or IPv6 */
@@ -79,7 +79,7 @@ void setup(char* port, char* host){
 	servaddr = (struct sockaddr_in*) result->ai_addr;
 }
 
-void create_buffer(uint32_t (&sendbuff)[HEADER_SIZE/sizeof(int)], Header head){
+void create_buffer(uint32_t (&sendbuff)[HEADER_SIZE/sizeof(int)], Header head) {
 	memset(sendbuff, 0, sizeof(sendbuff));
 	uint32_t nseqnum = htonl(head.seq_num);
 	uint32_t nacknum = htonl(head.ack_num);
@@ -105,7 +105,7 @@ void parse_header(uint32_t buffer[3], Header& h) {
 	std::cout << std::endl;
 }
 
-void create_header(Header& h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t flgs){
+void create_header(Header& h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t flgs) {
 	h.seq_num = seq;
 	h.ack_num = ack;
 	h.conn_id = connid;
@@ -120,7 +120,7 @@ void create_header(Header& h, uint32_t seq, uint32_t ack, uint16_t connid, uint1
 	std::cout << std::endl;
 }
 
-int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t flgs){
+int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t flgs) {
 	if (h.seq_num == seq &&
 		h.ack_num == ack &&
 		h.conn_id == connid &&
@@ -131,7 +131,7 @@ int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t
 	}
 }
 
-void handle_transfer(){
+void handle_transfer() {
 	c.cwnd = INIT_CWND;
 	c.ssthresh = INIT_SSTHRESH;
 	Header h;
@@ -151,7 +151,6 @@ void handle_transfer(){
 	// Receive SYN ACK
 	int recvbytes;
 	recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), &len);
-	// std::cerr << "Bytes: " << std::to_string(recvbytes) << std::endl;
 	Header synack;
 	parse_header(recvbuff, synack);
 	c.id = synack.conn_id;
@@ -169,6 +168,35 @@ void handle_transfer(){
 	rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
 	if (rv < 0) {
 		report_error("sending ACK to server", true, 1);
+	}
+
+	//SEND FILE
+	char readbuff[PACKET_SIZE - HEADER_SIZE];
+	int readbytes = fread(readbuff, sizeof(char), PACKET_SIZE - HEADER_SIZE, c.fd);
+	if (readbytes < 0) {
+		report_error("sending file to server", true, 1);
+	}
+	if (readbytes > 0) {
+		char packet[PACKET_SIZE];
+		memset(packet, 0, PACKET_SIZE);
+		create_header(h, c.client_seq_num, c.server_seq_num, c.id, 0);
+		create_buffer(sendbuff, h);
+		memcpy(packet, sendbuff, HEADER_SIZE);
+		memcpy(packet + HEADER_SIZE, readbuff, PACKET_SIZE - HEADER_SIZE);
+		rv = sendto(sockfd, packet, PACKET_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
+		if (rv < 0) {
+			report_error("sending packet to server", true, 1);
+		}
+		c.client_seq_num += readbytes;
+	}
+
+	// Wait for ACK
+	recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+	parse_header(recvbuff, h);
+	c.id = h.conn_id;
+	c.server_seq_num = h.seq_num;
+	if (check_header(h, c.server_seq_num, c.client_seq_num, c.id, ACK) < 0) {
+		report_error("receiving ACK from server", true, 1);
 	}
 
 	// Send FIN
