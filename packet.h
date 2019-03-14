@@ -32,7 +32,7 @@ public:
 
     uint32_t seq_num, ack_num;
     uint16_t conn_id, flags;
-    uint32_t payload[MAX_PAYLOAD_SIZE];
+    uint8_t payload[MAX_PAYLOAD_SIZE];
     
     int size() const {return size_;}
     int payload_size() const {return payload_size_;}

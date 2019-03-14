@@ -17,6 +17,9 @@
 int sock_fd;
 std::string file_dir;
 
+struct sockaddr_in client;
+socklen_t client_len = sizeof(client);
+
 enum class PrintSetting {
 	Received,
 	Sent,
@@ -75,14 +78,32 @@ void setup(int port) {
 	if (bind(sock_fd, (struct sockaddr*)&server, sizeof(server)) < 0) send_error("Failed binding socket to port.");
 }
 
+void send_packet(PacketArgs args) {
+	Packet resp = Packet(args);
+
+	uint8_t out_buffer[MAX_PACKET_SIZE];
+	resp.to_uint32_string(out_buffer);
+
+	if (sendto(sock_fd, out_buffer, resp.size(), 0, (struct sockaddr*)&client, client_len) <= 0) {
+		send_error("Packet sending error occurred.");
+	}
+	print_output(PrintSetting::Sent, resp);
+}
+
 bool build_response(const Packet& p, PacketArgs& args) {
 	Connection c = connections[p.conn_id];
 
-	args.seq_num = c.server_seq_num;
+	if (c.is_closing) {
+		args.flags = ACK | FIN;
+	}
+	else {
+		args.flags = ACK;
+		if (p.flags & SYN) args.flags += SYN;
+	}
+
 	args.ack_num = c.client_seq_num;
+	args.seq_num = c.server_seq_num;
 	args.conn_id = p.conn_id;
-	args.flags = ACK;
-	if (p.flags & SYN) args.flags += SYN;
 
 	return true;
 }
@@ -114,27 +135,33 @@ PacketStatus update_connection_state(Packet& p) {
 		if (p.seq_num == it->second.client_seq_num) {
 			// Received FIN packet
 			if (p.flags & FIN) {
-				
-
-				return PacketStatus::Drop;
+				it->second.client_seq_num = (it->second.client_seq_num % 102400) + 1;
+				it->second.is_closing = true;
+				return PacketStatus::Reply;
 			}
 			// Received handshake ACK
 			else if ((p.flags & ACK) && it->second.needs_ack) {
-				std::cout << "Received handshake ack\n";
+				// std::cout << "Received handshake ack\n";
 				if (p.ack_num == it->second.server_seq_num + 1) {
 					it->second.server_seq_num = p.ack_num;
 					it->second.needs_ack = false;
 					return PacketStatus::Accept;
 				}
 			}
-			// Received general ACK, w/ or w/o payload
+			// Received FIN/ACK ACK
+			else if ((p.flags & ACK) && it->second.is_closing) {
+				connections.erase(it);
+				return PacketStatus::Accept;
+			}
+			// Received no ACK, w/ or w/o payload
 			else if (!(p.flags & ACK)) {
-				std::cout << "General ACK, size: " << p.size() << "\n";
+				// std::cout << "General ACK, size: " << p.size() << "\n";
 
 				if (p.payload_size()) {
-					it->second.client_seq_num += p.payload_size();
+					it->second.client_seq_num = (it->second.client_seq_num + p.payload_size()) % 102401;
+					if (fwrite(p.payload, 1, p.payload_size(), it->second.fd) <= 0) send_error("Write error occurred.");
 				}
-				else it->second.client_seq_num++;
+				else it->second.client_seq_num = (it->second.client_seq_num % 102401) + 1;
 
 				return PacketStatus::Reply;
 			}
@@ -173,9 +200,6 @@ void print_output(PrintSetting action, const Packet& p) {
 
 void handle_transfer() {
 
-	struct sockaddr_in client;
-	socklen_t client_len = sizeof(client);
-
 	// struct timeval tv;
 	// tv.tv_sec = 15;
 	// tv.tv_usec = 0;
@@ -195,7 +219,6 @@ void handle_transfer() {
 		print_output(PrintSetting::Received, recv);
 
 		PacketStatus ps = update_connection_state(recv);
-		uint16_t conn_id = recv.conn_id;
 
 		PacketArgs resp_args;
 		switch (ps) {
@@ -209,15 +232,7 @@ void handle_transfer() {
 				continue;
 		}
 
-		Packet resp = Packet(resp_args);
-
-		uint8_t out_buffer[MAX_PACKET_SIZE];
-		resp.to_uint32_string(out_buffer);
-
-		if ((num_bytes = sendto(sock_fd, out_buffer, resp.size(), 0, (struct sockaddr*)&client, client_len)) <= 0) {
-			send_error("Packet sending error occurred.");
-		}
-		print_output(PrintSetting::Sent, resp);
+		send_packet(resp_args);
     }
 }
 
