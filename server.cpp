@@ -1,18 +1,8 @@
-#include <string>
 #include <iostream>
-#include <cstdlib>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <climits>
-#include <unistd.h>
-#include <cstring>
 #include <fcntl.h>
 #include <signal.h>
 #include <map>
 #include "packet.h"
-#include <cassert>
 
 int sock_fd;
 std::string file_dir;
@@ -33,7 +23,7 @@ enum class PacketStatus {
 };
 
 typedef struct {
-	FILE* fd;
+	FILE* fp;
 	uint32_t client_seq_num;
 	uint32_t server_seq_num;
 	bool needs_ack;
@@ -45,10 +35,13 @@ std::map<uint16_t, Connection> connections;
 uint16_t curr_max_id = 0;
 
 void setup(int port);
-void send_error(std::string msg, int exit_code = 1);
-void sig_handler(int signum);
 void handle_transfer();
 void print_output(PrintSetting action, const Packet& p);
+PacketStatus update_connection_state(Packet& p);
+bool build_response(const Packet& p, PacketArgs& args);
+void send_packet(PacketArgs args);
+void sig_handler(int signum);
+void send_error(std::string msg, int exit_code = 1);
 
 int main(int argc, char *argv[]) {
 	if (argc != 3) send_error("Must include only <PORT> and <FILE-DIR> arguments.");
@@ -118,10 +111,10 @@ PacketStatus update_connection_state(Packet& p) {
 			conn_id = curr_max_id + 1;
 
 			std::string filename = file_dir + "/" + std::to_string(conn_id) + ".file";
-			FILE *fd = fopen(filename.c_str(), "w+");
-			if (fd == nullptr) send_error("Failed creating new file.");
+			FILE *fp = fopen(filename.c_str(), "w+");
+			if (fp == nullptr) send_error("Failed creating new file.");
 
-			Connection c = (Connection) {.fd = fd, .client_seq_num = p.seq_num+1, .server_seq_num = 4321, .needs_ack = true};
+			Connection c = (Connection) {.fp = fp, .client_seq_num = p.seq_num+1, .server_seq_num = 4321, .needs_ack = true};
 
 			connections[conn_id] = c;
 			curr_max_id++;
@@ -150,6 +143,7 @@ PacketStatus update_connection_state(Packet& p) {
 			}
 			// Received FIN/ACK ACK
 			else if ((p.flags & ACK) && it->second.is_closing) {
+				fclose(it->second.fp);
 				connections.erase(it);
 				return PacketStatus::Accept;
 			}
@@ -159,7 +153,7 @@ PacketStatus update_connection_state(Packet& p) {
 
 				if (p.payload_size()) {
 					it->second.client_seq_num = (it->second.client_seq_num + p.payload_size()) % 102401;
-					if (fwrite(p.payload, 1, p.payload_size(), it->second.fd) <= 0) send_error("Write error occurred.");
+					if (fwrite(p.payload, 1, p.payload_size(), it->second.fp) <= 0) send_error("Write error occurred.");
 				}
 				else it->second.client_seq_num = (it->second.client_seq_num % 102401) + 1;
 
@@ -216,19 +210,20 @@ void handle_transfer() {
     	}
 
 		Packet recv = Packet(buffer, num_bytes);
-		print_output(PrintSetting::Received, recv);
 
 		PacketStatus ps = update_connection_state(recv);
 
 		PacketArgs resp_args;
 		switch (ps) {
 			case PacketStatus::Reply:
+				print_output(PrintSetting::Received, recv);
 				build_response(recv, resp_args);
 				break;
 			case PacketStatus::Drop:
 				print_output(PrintSetting::Dropped, recv);
 				continue;
 			case PacketStatus::Accept:
+				print_output(PrintSetting::Received, recv);
 				continue;
 		}
 
