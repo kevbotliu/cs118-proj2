@@ -1,62 +1,45 @@
 #include "packet.h"
 #include <iostream>
 
-Packet::Packet(const uint32_t buffer[MAX_PACKET_SIZE/4], int packet_size) : size(packet_size) {
-	if (packet_size < HEADER_SIZE) {
-		std::cerr << "Packet size too small!\n";
-		valid_ = false;
+Packet::Packet(const uint8_t buffer[MAX_PACKET_SIZE], int packet_size) : size(packet_size) {
+	if (size < HEADER_SIZE) valid_ = false;
+	else {
+		payload_size = size - HEADER_SIZE;
+
+		memcpy(&seq_num, buffer, 4);
+		memcpy(&ack_num, buffer+4, 4);
+		memcpy(&flags, buffer+8, 2);
+		memcpy(&conn_id, buffer+10, 2);
+		memcpy(&payload, buffer+12, payload_size);
+
+		seq_num = ntohl(seq_num);
+		ack_num = ntohl(ack_num);
+		conn_id = ntohs(conn_id);
+		flags = ntohs(flags);
 	}
-	else valid_ = parse(buffer);
 }
 
-Packet::Packet(PacketArgs args)
-  : seq_num(args.seq_num),
-	ack_num(args.ack_num),
-	conn_id(args.conn_id),
-	ack_flag(args.ack_flag),
-	syn_flag(args.syn_flag), 
-	fin_flag(args.fin_flag),
-	size(args.packet_size)
-{
-	memcpy(payload, args.payload, sizeof(args.payload));
-	if (args.packet_size < HEADER_SIZE) {
-		std::cerr << "Packet size too small!\n";
-		valid_ = false;
+Packet::Packet(const PacketArgs& args) : size(args.size) {
+	if (size < HEADER_SIZE) valid_ = false;
+	else {
+		payload_size = size - HEADER_SIZE;
+
+		seq_num = args.seq_num;
+		ack_num = args.ack_num;
+		conn_id = args.conn_id;
+		flags = args.flags;
 	}
-	else valid_ = true;
 }
 
-Packet::~Packet() { 
-}
+void Packet::to_uint32_string(uint8_t (&buf)[MAX_PACKET_SIZE]) const {
+	uint32_t val = htonl(seq_num);
+	memcpy(buf, &val, 4);
 
-bool Packet::parse(const uint32_t buffer[MAX_PACKET_SIZE/4]) {
-	seq_num = ntohl(buffer[0]);
-	ack_num = ntohl(buffer[1]);
-	conn_id = (uint16_t)ntohl(buffer[2]) >> 16;
-	uint16_t flags = (uint16_t)ntohl(buffer[2]);
-	ack_flag = flags & ACK;
-	syn_flag = flags & SYN;
-	fin_flag = flags & FIN;
+	val = htonl(ack_num);
+	memcpy(buf+4, &val, 4);
 
-	uint16_t unused_mask = 0xFFF8;
-	if (flags & unused_mask) return false;
+	val = htonl(((uint32_t)conn_id << 16) + flags);
+	memcpy(buf+8, &val, 4);
 
-	memcpy(payload, buffer + HEADER_SIZE/4, size - HEADER_SIZE);
-	
-	return true;
-}
-
-uint32_t* Packet::to_uint32_string() {
-	uint32_t row3 = (((uint32_t) conn_id) << 16);
-	if (ack_flag) row3 += 4;
-	if (syn_flag) row3 += 2;
-	if (fin_flag) row3 += 1;
-
-	uint32_t* str = new uint32_t[MAX_PACKET_SIZE/4];
-	str[0] = htonl(seq_num);
-	str[1] = htonl(ack_num);
-	str[2] = htonl(row3);
-	memcpy(str + HEADER_SIZE/4, payload, size - HEADER_SIZE);
-
-	return str;
+	memcpy(buf+12, payload, payload_size);
 }
