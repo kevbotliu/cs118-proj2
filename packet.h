@@ -21,7 +21,7 @@ const uint16_t FIN = 1;
 typedef struct {
 	uint32_t seq_num, ack_num;
 	uint16_t conn_id, flags;
-	uint32_t* payload = {};
+	uint32_t payload[MAX_PAYLOAD_SIZE] = {};
 	int size = HEADER_SIZE;
 } PacketArgs;
 
@@ -32,15 +32,17 @@ public:
 
     uint32_t seq_num, ack_num;
     uint16_t conn_id, flags;
-    uint32_t* payload;
-    int size;
-    int payload_size;
-
+    uint32_t payload[MAX_PAYLOAD_SIZE];
+    
+    int size() const {return size_;}
+    int payload_size() const {return payload_size_;}
     void to_uint32_string(uint8_t (&buf)[MAX_PACKET_SIZE]) const;
     bool is_valid() const {return valid_;}
 
 private:
 	bool valid_ = true;
+	int size_ = 0;
+    int payload_size_ = 0;
 
 };
 #endif
