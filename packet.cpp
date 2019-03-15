@@ -30,6 +30,7 @@ Packet::Packet(const PacketArgs& args) : size_(args.size) {
 		ack_num = args.ack_num;
 		conn_id = args.conn_id;
 		flags = args.flags;
+		memcpy(&payload, &args.payload, payload_size_);
 	}
 }
 

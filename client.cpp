@@ -14,8 +14,15 @@
 #include <thread>
 #include <bitset>
 #include <sys/time.h>
+#include "packet.h"
 
 int rv;
+
+enum PrintSetting {
+	rcvd,
+	sent,
+	drop
+};
 
 struct Header {
 	uint32_t seq_num;
@@ -34,13 +41,7 @@ struct Connection {
 	uint32_t ssthresh;
 };
 
-const uint16_t ACK = 4;
-const uint16_t SYN = 2;
-const uint16_t FIN = 1;
-
-const uint32_t MAXNUM = 102400;
-const uint16_t HEADER_SIZE = 12;
-const uint16_t PACKET_SIZE = 524;
+const uint32_t MAX_NUM = 102400;
 const uint16_t MAX_CWND = 51200;
 const uint16_t INIT_CWND = 512;
 const uint16_t INIT_SSTHRESH = 10000;
@@ -79,55 +80,46 @@ void setup(char* port, char* host) {
 	servaddr = (struct sockaddr_in*) result->ai_addr;
 }
 
-void create_buffer(uint32_t (&sendbuff)[HEADER_SIZE/sizeof(int)], Header head) {
-	memset(sendbuff, 0, sizeof(sendbuff));
-	uint32_t nseqnum = htonl(head.seq_num);
-	uint32_t nacknum = htonl(head.ack_num);
-	uint32_t nconflg = htonl((head.conn_id << 16) | ((uint16_t)(head.flags[13]<<2)|(head.flags[14]<<1)|head.flags[15]));
-	memcpy(sendbuff, &nseqnum, 4);
-	memcpy(sendbuff + 1, &nacknum, 4);
-	memcpy(sendbuff + 2, &nconflg, 4);
+void print_output(PrintSetting action, const Packet& p) {
+	std::string output;
+	bool dup = false;
+	switch (action) {
+		case rcvd:
+			output = "RECV";
+			break;
+		case sent:
+			output = "SEND";
+			break;
+		case drop:
+			output = "DROP";
+			break;
+	}
+	output += " " + std::to_string(p.seq_num);
+	output += " " + std::to_string(p.ack_num);
+	output += " " + std::to_string(p.conn_id);
+	if (action != drop) {
+		output += " " + std::to_string(c.cwnd);
+		output += " " + std::to_string(c.ssthresh);
+	}
+	if (p.flags & ACK) output += " ACK";
+	if (p.flags & SYN) output += " SYN";
+	if (p.flags & FIN) output += " FIN";
+
+	std::cout << output << std::endl;
 }
 
-void parse_header(uint32_t buffer[3], Header& h) {
-	h.seq_num = ntohl(buffer[0]);
-	h.ack_num = ntohl(buffer[1]);
-	uint32_t conn = ntohl(buffer[2]);
-	h.flags[13] = ((conn & ACK) >> 2);
-	h.flags[14] = ((conn & SYN) >> 1);
-	h.flags[15] = conn & FIN;
-	h.conn_id = (conn >> 16);
+void retransmit(Packet* p) {
 
-	std::cout << "RECV " << h.seq_num << " " << h.ack_num << " " << h.conn_id << " " << c.cwnd << " " << c.ssthresh;
-	if (h.flags[13]) { std::cout << " ACK"; }
-	if (h.flags[14]) { std::cout << " SYN"; }
-	if (h.flags[15]) { std::cout << " FIN"; }
-	std::cout << std::endl;
 }
 
-void create_header(Header& h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t flgs) {
-	h.seq_num = seq;
-	h.ack_num = ack;
-	h.conn_id = connid;
-	h.flags[13] = ((flgs & ACK) >> 2);
-	h.flags[14] = ((flgs & SYN) >> 1);
-	h.flags[15] = (flgs & FIN);
-
-	std::cout << "SEND " << seq << " " << ack << " " << connid << " " << c.cwnd << " " << c.ssthresh;
-	if (h.flags[13]) { std::cout << " ACK"; }
-	if (h.flags[14]) { std::cout << " SYN"; }
-	if (h.flags[15]) { std::cout << " FIN"; }
-	std::cout << std::endl;
-}
-
-int check_header(Header h, uint32_t seq, uint32_t ack, uint16_t connid, uint16_t flgs) {
-	if (h.seq_num == seq &&
-		h.ack_num == ack &&
-		h.conn_id == connid &&
-		((uint16_t) ((h.flags[13]<<2) | (h.flags[14]<<1) | h.flags[15])) == flgs) {
+int check_header(Packet p, const uint16_t flgs) {
+	if (p.seq_num == c.server_seq_num &&
+		p.ack_num == c.client_seq_num &&
+		p.conn_id == c.id &&
+		p.flags == flgs) {
 		return 1;
 	} else {
-		return -1;
+		return -1; // DROP THE PACKET
 	}
 }
 
@@ -136,122 +128,156 @@ void handle_transfer() {
 	c.ssthresh = INIT_SSTHRESH;
 	Header h;
 	c.client_seq_num = 12345;
-	create_header(h, 12345, 0, 0, SYN);
-	uint32_t sendbuff[HEADER_SIZE/sizeof(int)];
-	create_buffer(sendbuff, h);
-	uint32_t recvbuff[HEADER_SIZE/sizeof(int)];
-
 	socklen_t len;
+	int recv_bytes;
+	uint8_t recv_buff[MAX_PACKET_SIZE];
+	struct timeval ack_timeout;
+	ack_timeout.tv_sec = 0;
+	ack_timeout.tv_usec =  500000;
+
 	// Send SYN
-	rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
-	if (rv < 0) {
+	PacketArgs args;
+	args.seq_num = c.client_seq_num;
+	args.ack_num = 0;
+	args.conn_id = 0;
+	args.flags = SYN;
+	Packet p = Packet(args);
+	uint8_t send_pack[MAX_PACKET_SIZE];
+	p.to_uint32_string(send_pack);
+	print_output(sent, p);
+	if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr)) < 0) {
 		report_error("sending SYN to server", true, 1);
 	}
 
 	// Receive SYN ACK
-	int recvbytes;
-	recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), &len);
-	Header synack;
-	parse_header(recvbuff, synack);
-	c.id = synack.conn_id;
-	c.server_seq_num = synack.seq_num;
+	if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &ack_timeout, sizeof (ack_timeout)) == -1) {
+		report_error("setting socket receive timeout", true, 1);
+	}
+	recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr *) &(*servaddr), &len);
+	if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		std::cerr << "DEBUG: ACK timeout" << std::endl;
+		retransmit(&p);
+	}
+	p = Packet(recv_buff, recv_bytes);
+	c.id = p.conn_id;
+	c.server_seq_num = p.seq_num;
 	c.client_seq_num++;
-	rv = check_header(synack, c.server_seq_num, c.client_seq_num, c.id, SYN | ACK);
-	if (rv < 0) {
+	if (check_header(p, SYN | ACK) < 0) {
 		report_error("receiving SYN ACK from server", true, 1);
 	}
+	print_output(rcvd, p);
 
 	// Send ACK
 	c.server_seq_num++;
-	create_header(h, c.client_seq_num, c.server_seq_num, c.id, ACK);
-	create_buffer(sendbuff, h);
-	rv = sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
-	if (rv < 0) {
+	args.seq_num = c.client_seq_num;
+	args.ack_num = c.server_seq_num;
+	args.conn_id = c.id;
+	args.flags = ACK;
+	p = Packet(args);
+	p.to_uint32_string(send_pack);
+	print_output(sent, p);
+	if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr)) < 0) {
 		report_error("sending ACK to server", true, 1);
 	}
 
-	//SEND FILE
-	char readbuff[PACKET_SIZE - HEADER_SIZE];
-	int readbytes = fread(readbuff, sizeof(char), PACKET_SIZE - HEADER_SIZE, c.fd);
-	if (readbytes < 0) {
-		report_error("sending file to server", true, 1);
-	}
-	if (readbytes > 0) {
-		char packet[PACKET_SIZE];
-		memset(packet, 0, PACKET_SIZE);
-		create_header(h, c.client_seq_num, c.server_seq_num, c.id, 0);
-		create_buffer(sendbuff, h);
-		memcpy(packet, sendbuff, HEADER_SIZE);
-		memcpy(packet + HEADER_SIZE, readbuff, PACKET_SIZE - HEADER_SIZE);
-		rv = sendto(sockfd, packet, PACKET_SIZE, 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr));
-		if (rv < 0) {
-			report_error("sending packet to server", true, 1);
+	// Send file
+	while(1) {
+		uint8_t read_buff[MAX_PAYLOAD_SIZE];
+		int read_bytes = fread(read_buff, sizeof(char), MAX_PAYLOAD_SIZE, c.fd); // TODO: Client sending the same payload over and over
+		
+		if (read_bytes < 0) {
+			report_error("reading payload file", true, 1);
 		}
-		c.client_seq_num += readbytes;
-	}
+		if (read_bytes == 0) { // No payload to send
+			break;
+		}
+		if (read_bytes > 0) {
+			args.seq_num = c.client_seq_num;
+			args.ack_num = 0;
+			args.flags = 0;
+			// std::cerr << "DEBUG: read bytes " << std::to_string(read_bytes) << std::endl;
+			// std::cerr << "DEBUG: " << std::endl;
+			// for (int i = 0; i < read_bytes; i++) {
+			// 	std::cerr << std::to_string(read_buff[i]);
+			// 	if (i % 8 == 0)
+			// 		std::cerr << std::endl;
+			// } std::cerr << std::endl;
+			memcpy(&args.payload, read_buff, read_bytes);
+			args.size = HEADER_SIZE + read_bytes;
+			p = Packet(args);
+			p.to_uint32_string(send_pack);
+			print_output(sent, p);
+			if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr)) < 0) {
+				report_error("sending payload packet to server", true, 1);
+			}
+			c.client_seq_num += read_bytes;
+			c.client_seq_num %= (MAX_NUM+1);
+		}
 
-	// Wait for ACK
-	recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-	parse_header(recvbuff, h);
-	c.id = h.conn_id;
-	c.server_seq_num = h.seq_num;
-	if (check_header(h, c.server_seq_num, c.client_seq_num, c.id, ACK) < 0) {
-		report_error("receiving ACK from server", true, 1);
+		// Wait for ACK
+		recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+		p = Packet(recv_buff, recv_bytes);
+		c.server_seq_num = p.seq_num;
+		c.client_seq_num %= (MAX_NUM+1);
+		if (check_header(p, ACK) < 0) { // TODO: This should probably error in check header for incorrect header information and drop the packet not print output later
+			report_error("receiving ACK from server", true, 1);
+		}
+		print_output(rcvd, p);
 	}
-
+	
 	// Send FIN
-	create_header(h, c.client_seq_num, 0, c.id, FIN);
-	create_buffer(sendbuff, h);
-	if (sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr*) &(*servaddr), sizeof(*servaddr)) < 0) {
+	args.seq_num = c.client_seq_num;
+	args.ack_num = 0;
+	args.flags = FIN;
+	args.size = HEADER_SIZE;
+	p = Packet(args);
+	p.to_uint32_string(send_pack);
+	print_output(sent, p);
+	if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr*) &(*servaddr), sizeof(*servaddr)) < 0) {
 		report_error("sending FIN to server", true, 1);
 	}
 
 	// Receive ACK FIN
-	recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-	if (recvbytes < 0) { std::cerr << "INTERNAL: error in recvfrom()" << std::endl; }
-	Header ackfin;
-	parse_header(recvbuff, ackfin);
-	c.id = ackfin.conn_id;
-	c.server_seq_num = ackfin.seq_num;
+	recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+	if (recv_bytes < 0) { std::cerr << "INTERNAL: error in recvfrom()" << std::endl; }
+	p = Packet(recv_buff, recv_bytes);
+	c.id = p.conn_id;
+	c.server_seq_num = p.seq_num;
 	c.client_seq_num++;
-	if (check_header(ackfin, c.server_seq_num, c.client_seq_num, c.id, ACK | FIN) < 0) {
+	if (check_header(p, ACK | FIN) < 0) {
 		report_error("receiving ACK FIN from server", true, 1);
 	}
+	print_output(rcvd, p);
+
+	// Initialize FIN timeout
 	struct timeval fin_timeout;
-	// fin_timeout.tv_sec = 2;
-	// fin_timeout.tv_usec = 0;
 	struct timeval current_time;
 	if ((gettimeofday(&fin_timeout, NULL) == -1) || (gettimeofday(&current_time, NULL) == -1)) {
 		report_error("getting current time", true, 1);
 	}
-	// setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*) &fin_timeout, sizeof(struct timeval));
+	setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, 0, sizeof(struct timeval)); // Remove ack timeout
 
 	// Send ACK
 	c.server_seq_num++;
-	create_header(h, c.client_seq_num, c.server_seq_num, c.id, ACK);
-	create_buffer(sendbuff, h);
-	if (sendto(sockfd, sendbuff, HEADER_SIZE, 0, (struct sockaddr*) &(*servaddr), sizeof(*servaddr)) < 0) {
+	args.seq_num = c.client_seq_num;
+	args.ack_num = c.server_seq_num;
+	args.flags = ACK;
+	p = Packet(args);
+	p.to_uint32_string(send_pack);
+	print_output(sent, p);
+	if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr*) &(*servaddr), sizeof(*servaddr)) < 0) {
 		report_error("sending ACK to server", true, 1);
 	}
 
-	// TODO: Incorporate into parse header, make everything nonblocking for other timers to operate.
+	// TODO: Make everything nonblocking for other timers to operate?????
 	while(1) {
 		gettimeofday(&current_time, NULL);
 		if ((current_time.tv_sec - fin_timeout.tv_sec) <= 2) {
 			fcntl(sockfd, F_SETFL, O_NONBLOCK);
-			recvbytes = recvfrom(sockfd, recvbuff, HEADER_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-			if (recvbytes > 0) {
-				Header drop_header;
-				drop_header.seq_num = ntohl(recvbuff[0]);
-				drop_header.ack_num = ntohl(recvbuff[1]);
-				uint32_t conn = ntohl(recvbuff[2]);
-				drop_header.conn_id = (conn >> 16);
-
-				std::cout << "DROP " << drop_header.seq_num << " " << drop_header.ack_num << " " << drop_header.conn_id;
-				if ((conn & ACK) >> 2) { std::cout << " ACK"; }
-				if ((conn & SYN) >> 1) { std::cout << " SYN"; }
-				if (conn & FIN) { std::cout << " FIN"; }
-				std::cout << std::endl;
+			recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+			p = Packet(recv_buff, recv_bytes);
+			if (recv_bytes > 0) {
+				print_output(drop, p);
 			}
 		}
 		else

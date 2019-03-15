@@ -21,7 +21,7 @@ const uint16_t FIN = 1;
 typedef struct {
 	uint32_t seq_num, ack_num;
 	uint16_t conn_id, flags;
-	uint32_t payload[MAX_PAYLOAD_SIZE] = {};
+	uint8_t payload[MAX_PAYLOAD_SIZE] = {};
 	int size = HEADER_SIZE;
 } PacketArgs;
 
