@@ -110,11 +110,7 @@ PacketStatus update_connection_state(Packet& p) {
 		if (p.flags & SYN) {
 			conn_id = curr_max_id + 1;
 
-			std::string filename = file_dir + "/" + std::to_string(conn_id) + ".file";
-			FILE *fp = fopen(filename.c_str(), "w+");
-			if (fp == nullptr) send_error("Failed creating new file.");
-
-			Connection c = (Connection) {.fp = fp, .client_seq_num = p.seq_num+1, .server_seq_num = 4321, .needs_ack = true};
+			Connection c = (Connection) {.fp = nullptr, .client_seq_num = p.seq_num+1, .server_seq_num = 4321, .needs_ack = true};
 
 			connections[conn_id] = c;
 			curr_max_id++;
@@ -136,6 +132,12 @@ PacketStatus update_connection_state(Packet& p) {
 			else if ((p.flags & ACK) && it->second.needs_ack) {
 				// std::cout << "Received handshake ack\n";
 				if (p.ack_num == it->second.server_seq_num + 1) {
+					// Create file
+					std::string filename = file_dir + "/" + std::to_string(conn_id) + ".file";
+					FILE *fp = fopen(filename.c_str(), "w+");
+					if (fp == nullptr) send_error("Failed creating new file.");
+					it->second.fp = fp;
+					
 					it->second.server_seq_num = p.ack_num;
 					it->second.needs_ack = false;
 					return PacketStatus::Accept;
