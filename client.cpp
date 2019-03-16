@@ -278,31 +278,29 @@ void handle_transfer() {
 
 			do { // Check for ACK received, retransmit
 				recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-				if (recv_bytes > 0) { // TODO: Make sure that received is an ACK
+				if (recv_bytes > 0) {
 					gettimeofday(&receive_time, NULL);
 					break;
 				}
-				
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				 	// std::cerr << "DEBUG: ACK timeout" << std::endl;
+				 	retransmit(p);
+				}
 			} while(errno == EAGAIN || errno == EWOULDBLOCK);
-			// if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			// 	// std::cerr << "DEBUG: ACK timeout" << std::endl;
-			// 	retransmit(p/*, send_pack, p.size()*/);
-			// }
 			p = Packet(recv_buff, recv_bytes);
 
 			if (check_header_data(p, c_window.front(), ACK) == 1) {
 				// report_error("receiving ACK from server", true, 1);
 				c_window.pop();
+				print_output(rcvd, p);
 				congestion_mode();
 			}
 			else {
 				// std::cerr << "DEBUG: header incorrect" << std::endl;
 				retransmit(c_window.front());
 			}
-
 			c.server_seq_num = p.seq_num;
 			c.client_seq_num %= (MAX_NUM+1);
-			print_output(rcvd, p);
 		}
 		
 		if (!sending_data) {break; }
