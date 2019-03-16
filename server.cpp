@@ -169,7 +169,6 @@ PacketStatus update_connection_state(Packet& p) {
 
 void print_output(PrintSetting action, const Packet& p) {
 	std::string out;
-	bool dup = false;
 	switch (action) {
 		case PrintSetting::Received:
 			out = "RECV";

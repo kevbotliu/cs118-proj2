@@ -78,7 +78,6 @@ void setup(char* port, char* host) {
 
 void print_output(PrintSetting action, const Packet& p) {
 	std::string output;
-	bool dup = false;
 	switch (action) {
 		case rcvd:
 			output = "RECV";
