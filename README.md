@@ -46,10 +46,16 @@ UID: 604835032
 
 ### High Level Design
 #### Server
-Server begins by parsing arguments and setting up signal handlers for SIGQUIT and SIGTERM signals. The server then binds to the designated port and begins listening (with the recvfrom function) to incoming packets on that port. It conducts a handshake and can begin saving the incoming file from a given client.
+Server begins by parsing arguments and setting up signal handlers for SIGQUIT and SIGTERM signals. The server then binds to the designated port and begins listening (with the recvfrom function) to incoming packets on that port. It conducts a handshake and can begin saving the incoming file from a given client. 
+Every packet that is received by the server is multiplexed against connection IDs in a map of saved connection states. If a saved connection is matched, the sequence and acknowledgment numbers are checked and then the server writes the payload to the corresponding file. If connection ID of an incoming packet doesn't exist in the saved states, sequence or acknowledgment numbers aren't correctly incremented, or the packet is just malformed, the packet will be dropped.
+As soon as a SYN packet is received, connection state for that packet is created. When the client provides an ACK for the sent SYN/ACK, a file is created and further payloads from packets with the corresponding connection ID are written to the file.
+When a FIN packet is received, a saved connection state boolean is flipped and a FIN/ACK is sent back. When the corresponding ACK from the client is received, the connection state is deleted and file pointer closed.
 
 #### Client
 Client begin my taking that command arguments and parsing them for correctness as well as establishing a socket to be used for sending. After this has occurred, it starts to handle the data transfer to the server indicated. Client uses a couple timeval structs to keep track of current time and last time that a packet was received to implement a 10 second timeout for receiveing any data throught the socket. A receive timeout is also placed on all recvfrom() calls which prevents them from blocking for more than 0.5 seconds. When the 3 way handshake is established, the client enters a series of while loops which handle sending the actual data. Afterwards, the connection breakdown establishes and the client waits 2 seconds before gracefully exiting.
+
+#### Packet Class
+Client and Server classes both make use of an auxillary Packet class. The Packet class encapsulates and structures packet information received and sent as byte arrays. Using packet objects allows for easier management of packet information as well as easier debugging and transformation of information.
 
 ### Problems
 In the beginning, we really struggled with getting a basic UDP connection due to pointer errors.
