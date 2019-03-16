@@ -14,21 +14,14 @@
 #include <thread>
 #include <bitset>
 #include <sys/time.h>
+#include <queue>
 #include "packet.h"
-
-int rv;
 
 enum PrintSetting {
 	rcvd,
 	sent,
-	drop
-};
-
-struct Header {
-	uint32_t seq_num;
-	uint32_t ack_num;
-	uint16_t conn_id;
-	std::bitset<16> flags;
+	drop,
+	dupl
 };
 
 struct Connection {
@@ -50,6 +43,9 @@ int sockfd;
 struct addrinfo* result;
 struct sockaddr_in* servaddr;
 struct Connection c;
+struct timeval current_time;
+struct timeval receive_time;
+bool sending_data = false;
 
 void report_error(const std::string error_msg, const bool inc_errno, const int exit_code) {
 	if (inc_errno) {
@@ -82,12 +78,12 @@ void setup(char* port, char* host) {
 
 void print_output(PrintSetting action, const Packet& p) {
 	std::string output;
-	bool dup = false;
 	switch (action) {
 		case rcvd:
 			output = "RECV";
 			break;
 		case sent:
+		case dupl:
 			output = "SEND";
 			break;
 		case drop:
@@ -104,36 +100,84 @@ void print_output(PrintSetting action, const Packet& p) {
 	if (p.flags & ACK) output += " ACK";
 	if (p.flags & SYN) output += " SYN";
 	if (p.flags & FIN) output += " FIN";
+	if (action == dupl) output += " DUP";
 
 	std::cout << output << std::endl;
 }
 
-void retransmit(Packet* p) {
-
+int check_timeout() {
+	gettimeofday(&current_time, NULL);
+	if ((current_time.tv_sec - receive_time.tv_sec) >= 10) {
+		// std::cerr << "DEBUG: terminating gracefully" << std::endl;
+		exit(0); // Graceful termination
+	}
+	return 0;
 }
 
-int check_header(Packet p, const uint16_t flgs) {
+void congestion_mode() {
+	if (c.cwnd < c.ssthresh) {
+		c.cwnd += INIT_CWND;
+	}
+	else {
+		c.cwnd += INIT_CWND * INIT_CWND / c.cwnd;
+	}
+	if (c.cwnd > MAX_CWND) {
+		c.cwnd = MAX_CWND;
+	}
+}
+
+void retransmit(const Packet &p) {
+	if (sending_data) {
+		c.ssthresh = c.cwnd / 2;
+		c.cwnd = INIT_CWND;
+	}
+	check_timeout();
+	uint8_t packet[MAX_PACKET_SIZE];
+	p.to_uint32_string(packet);
+	if (sendto(sockfd, packet, p.size(), 0, (struct sockaddr*) &(*servaddr), sizeof(*servaddr)) < 0) {
+		report_error("retransmitting packet", true, 1);
+	}
+	print_output(dupl, p);
+}
+
+int check_header(const Packet p, const uint16_t flgs) {
 	if (p.seq_num == c.server_seq_num &&
 		p.ack_num == c.client_seq_num &&
 		p.conn_id == c.id &&
 		p.flags == flgs) {
+		return 1;	
+	} else {
+		print_output(drop, p);
+		return -1;
+	}
+}
+
+int check_header_data(const Packet p, const Packet &p2,const uint16_t flgs) {
+	// std::cerr << std::to_string(p.ack_num) << " " << std::to_string((p2.seq_num + p2.payload_size()) % (MAX_NUM+1)) << std::endl;
+	if (p.ack_num == ((p2.seq_num + p2.payload_size()) % (MAX_NUM+1)) &&
+		p.conn_id == p2.conn_id &&
+		p.flags == flgs) {
 		return 1;
 	} else {
-		return -1; // DROP THE PACKET
+		print_output(drop, p);
+		return -1;
 	}
 }
 
 void handle_transfer() {
 	c.cwnd = INIT_CWND;
 	c.ssthresh = INIT_SSTHRESH;
-	Header h;
 	c.client_seq_num = 12345;
 	socklen_t len;
 	int recv_bytes;
 	uint8_t recv_buff[MAX_PACKET_SIZE];
+	uint32_t c_win_size = INIT_CWND;
+	std::queue<Packet> c_window;
 	struct timeval ack_timeout;
 	ack_timeout.tv_sec = 0;
 	ack_timeout.tv_usec =  500000;
+	gettimeofday(&current_time, NULL);
+	gettimeofday(&receive_time, NULL);
 
 	// Send SYN
 	PacketArgs args;
@@ -150,14 +194,20 @@ void handle_transfer() {
 	}
 
 	// Receive SYN ACK
-	if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &ack_timeout, sizeof (ack_timeout)) == -1) {
+	if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &ack_timeout, sizeof (ack_timeout)) == -1) { // All recvfrom() have 0.5s timeout
 		report_error("setting socket receive timeout", true, 1);
 	}
-	recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr *) &(*servaddr), &len);
-	if (errno == EAGAIN || errno == EWOULDBLOCK) {
-		std::cerr << "DEBUG: ACK timeout" << std::endl;
-		retransmit(&p);
-	}
+	do { // Check for ACK received, retransmit
+		recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+		if (recv_bytes > 0) { // TODO: Make sure that received is an ACK
+			gettimeofday(&receive_time, NULL);
+			break; 
+		}
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			// std::cerr << "DEBUG: ACK timeout" << std::endl;
+			retransmit(p);
+		}
+	} while(errno == EAGAIN || errno == EWOULDBLOCK);
 	p = Packet(recv_buff, recv_bytes);
 	c.id = p.conn_id;
 	c.server_seq_num = p.seq_num;
@@ -179,53 +229,84 @@ void handle_transfer() {
 	if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr)) < 0) {
 		report_error("sending ACK to server", true, 1);
 	}
+	sending_data = true;
 
 	// Send file
 	while(1) {
 		uint8_t read_buff[MAX_PAYLOAD_SIZE];
-		int read_bytes = fread(read_buff, sizeof(char), MAX_PAYLOAD_SIZE, c.fd); // TODO: Client sending the same payload over and over
 		
-		if (read_bytes < 0) {
-			report_error("reading payload file", true, 1);
-		}
-		if (read_bytes == 0) { // No payload to send
-			break;
-		}
-		if (read_bytes > 0) {
-			args.seq_num = c.client_seq_num;
-			args.ack_num = 0;
-			args.flags = 0;
-			// std::cerr << "DEBUG: read bytes " << std::to_string(read_bytes) << std::endl;
-			// std::cerr << "DEBUG: " << std::endl;
-			// for (int i = 0; i < read_bytes; i++) {
-			// 	std::cerr << std::to_string(read_buff[i]);
-			// 	if (i % 8 == 0)
-			// 		std::cerr << std::endl;
-			// } std::cerr << std::endl;
-			memcpy(&args.payload, read_buff, read_bytes);
-			args.size = HEADER_SIZE + read_bytes;
-			p = Packet(args);
-			p.to_uint32_string(send_pack);
-			print_output(sent, p);
-			if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr)) < 0) {
-				report_error("sending payload packet to server", true, 1);
+		c_win_size = 0;
+
+		while(c_win_size < c.cwnd) {
+			int read_bytes = fread(read_buff, sizeof(char), MAX_PAYLOAD_SIZE, c.fd);
+			if (read_bytes < 0) {
+				report_error("reading payload file", true, 1);
 			}
-			c.client_seq_num += read_bytes;
-			c.client_seq_num %= (MAX_NUM+1);
+			if (read_bytes == 0) {
+				sending_data = false;
+				break; // No payload to send
+			}
+			if (read_bytes > 0) {
+				args.seq_num = c.client_seq_num;
+				args.ack_num = 0;
+				args.flags = 0;
+				// std::cerr << "DEBUG: read bytes " << std::to_string(read_bytes) << std::endl;
+				// std::cerr << "DEBUG: " << std::endl;
+				// for (int i = 0; i < read_bytes; i++) {
+				// 	std::cerr << std::to_string(read_buff[i]);
+				// 	if (i % 8 == 0)
+				// 		std::cerr << std::endl;
+				// } std::cerr << std::endl;
+				memcpy(&args.payload, read_buff, read_bytes);
+				args.size = HEADER_SIZE + read_bytes;
+				p = Packet(args);
+				c_window.push(p);
+				c_win_size += read_bytes;
+				p.to_uint32_string(send_pack);
+				print_output(sent, p);
+				if (sendto(sockfd, send_pack, p.size(), 0, (struct sockaddr *) &(*servaddr), sizeof(*servaddr)) < 0) {
+					report_error("sending payload packet to server", true, 1);
+				}
+				c.client_seq_num += read_bytes;
+				c.client_seq_num %= (MAX_NUM+1);
+			}
 		}
 
 		// Wait for ACK
-		recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-		p = Packet(recv_buff, recv_bytes);
-		c.server_seq_num = p.seq_num;
-		c.client_seq_num %= (MAX_NUM+1);
-		if (check_header(p, ACK) < 0) { // TODO: This should probably error in check header for incorrect header information and drop the packet not print output later
-			report_error("receiving ACK from server", true, 1);
+		while(!c_window.empty()) {
+
+			do { // Check for ACK received, retransmit
+				recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+				if (recv_bytes > 0) {
+					gettimeofday(&receive_time, NULL);
+					break;
+				}
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				 	// std::cerr << "DEBUG: ACK timeout" << std::endl;
+				 	retransmit(p);
+				}
+			} while(errno == EAGAIN || errno == EWOULDBLOCK);
+			p = Packet(recv_buff, recv_bytes);
+
+			if (check_header_data(p, c_window.front(), ACK) == 1) {
+				// report_error("receiving ACK from server", true, 1);
+				c_window.pop();
+				print_output(rcvd, p);
+				congestion_mode();
+			}
+			else {
+				// std::cerr << "DEBUG: header incorrect" << std::endl;
+				retransmit(c_window.front());
+			}
+			c.server_seq_num = p.seq_num;
+			c.client_seq_num %= (MAX_NUM+1);
 		}
-		print_output(rcvd, p);
+		
+		if (!sending_data) {break; }
 	}
 	
 	// Send FIN
+	sending_data = false;
 	args.seq_num = c.client_seq_num;
 	args.ack_num = 0;
 	args.flags = FIN;
@@ -238,10 +319,18 @@ void handle_transfer() {
 	}
 
 	// Receive ACK FIN
-	recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-	if (recv_bytes < 0) { std::cerr << "INTERNAL: error in recvfrom()" << std::endl; }
+	do { // Check for ACK received, retransmit
+		recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
+		if (recv_bytes > 0) { // TODO: Make sure that received is an ACK
+			gettimeofday(&receive_time, NULL);
+			break; 
+		}
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			// std::cerr << "DEBUG: ACK timeout" << std::endl;
+			retransmit(p/*, send_pack, p.size()*/);
+		}
+	} while(errno == EAGAIN || errno == EWOULDBLOCK);
 	p = Packet(recv_buff, recv_bytes);
-	c.id = p.conn_id;
 	c.server_seq_num = p.seq_num;
 	c.client_seq_num++;
 	if (check_header(p, ACK | FIN) < 0) {
@@ -251,7 +340,6 @@ void handle_transfer() {
 
 	// Initialize FIN timeout
 	struct timeval fin_timeout;
-	struct timeval current_time;
 	if ((gettimeofday(&fin_timeout, NULL) == -1) || (gettimeofday(&current_time, NULL) == -1)) {
 		report_error("getting current time", true, 1);
 	}
@@ -269,14 +357,14 @@ void handle_transfer() {
 		report_error("sending ACK to server", true, 1);
 	}
 
-	// TODO: Make everything nonblocking for other timers to operate?????
+	// Wait 2 seconds on FIN
 	while(1) {
 		gettimeofday(&current_time, NULL);
 		if ((current_time.tv_sec - fin_timeout.tv_sec) <= 2) {
 			fcntl(sockfd, F_SETFL, O_NONBLOCK);
 			recv_bytes = recvfrom(sockfd, recv_buff, MAX_PACKET_SIZE, 0, (struct sockaddr*) &(*servaddr), &len);
-			p = Packet(recv_buff, recv_bytes);
 			if (recv_bytes > 0) {
+				p = Packet(recv_buff, recv_bytes);
 				print_output(drop, p);
 			}
 		}
